@@ -1,0 +1,10 @@
+data/
+final_model/
+results/
+unsloth_compiled_cache/
+uploads/
+uploads_base/
+wandb/
+
+
+

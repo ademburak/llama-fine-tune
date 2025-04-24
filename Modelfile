@@ -1,0 +1,26 @@
+FROM llama2
+
+# Set the model path to our fine-tuned model
+PARAMETER path /home/burak/workspace/llama-fine-tune/final_model
+
+# Set model parameters
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+PARAMETER top_k 40
+PARAMETER num_ctx 2048
+
+# Enable vision capabilities
+PARAMETER vision true
+
+# Set the system prompt
+SYSTEM """
+You are a helpful AI assistant that can understand and describe images in detail.
+When shown an image, provide a detailed description focusing on the key elements, objects, and any notable features.
+"""
+
+# Set the template for chat
+TEMPLATE """
+{{.System}}
+
+{{.Prompt}}
+""" 
