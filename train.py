@@ -7,34 +7,72 @@ from trl import SFTTrainer
 import wandb
 import pandas as pd
 from PIL import Image
+from transformers import AutoImageProcessor
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Enable CUDA optimizations
+torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 on matmul
+torch.backends.cudnn.allow_tf32 = True  # Allow TF32 on cudnn
+torch.backends.cudnn.benchmark = True  # Enable cudnn auto-tuner
+torch.backends.cuda.enable_mem_efficient_sdp = True  # Enable memory-efficient attention
+torch.backends.cuda.enable_flash_sdp = True  # Enable Flash Attention if available
 
 print(torch.cuda.mem_get_info())
 # Initialize wandb
 wandb.init(project="llama-vision-fine-tuning")
 
-# Set up model and tokenizer - using Pixtral which fits in 16GB
-model, tokenizer = FastVisionModel.from_pretrained(
-    "unsloth/Qwen2-VL-2B-Instruct-bnb-4bit",  # Using Qwen2-VL-2B which is even smaller
-    load_in_4bit=True,
-    use_gradient_checkpointing="unsloth",
-    device_map="auto"
-)
+# Declare global variables
+model = None
+tokenizer = None
+image_processor = None
 
-# Configure LoRA
-model = FastVisionModel.get_peft_model(
-    model,
-    r=16,
-    target_modules=[
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj"
-    ],
-    lora_alpha=16,
-    lora_dropout=0,
-    bias="none",
-    use_gradient_checkpointing="unsloth",
-    random_state=42,
-    max_seq_length=2048
-)
+# Set up model and tokenizer - using Llama which fits in 16GB
+def load_model():
+    global model, tokenizer, image_processor
+    try:
+        logger.info("Loading model and tokenizer...")
+        model, tokenizer = FastVisionModel.from_pretrained(
+            "unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit",
+            load_in_4bit=True,
+            use_gradient_checkpointing="unsloth",
+            device_map="auto"
+        )
+        
+        # Load the image processor with optimized settings
+        image_processor = AutoImageProcessor.from_pretrained(
+            "unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit",
+            do_resize=True,
+            do_center_crop=True
+        )
+        
+        # Configure LoRA first
+        model = FastVisionModel.get_peft_model(
+            model,
+            r=16,
+            target_modules=[
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj"
+            ],
+            lora_alpha=16,
+            lora_dropout=0,
+            bias="none",
+            use_gradient_checkpointing="unsloth",
+            random_state=42,
+            max_seq_length=2048
+        )
+        
+        # Clean up CUDA memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+    except Exception as e:
+        logger.error(f"Error loading model: {str(e)}")
+        raise
 
 # Load and prepare dataset
 def prepare_dataset():
@@ -86,27 +124,25 @@ def prepare_dataset():
     dataset = dataset.map(format_instruction)
     return dataset
 
-# Training arguments - updated to use bfloat16 instead of float16
+# Training arguments - minimal version for 50 epochs
 training_args = TrainingArguments(
     output_dir="./results",
-    num_train_epochs=3,
-    per_device_train_batch_size=2,  # Reduced batch size for memory constraints
-    gradient_accumulation_steps=8,  # Increased gradient accumulation
-    warmup_ratio=0.1,
-    logging_steps=10,
-    save_steps=100,
+    num_train_epochs=50,
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=8,
     learning_rate=2e-4,
-    fp16=False,  # Disable float16
-    bf16=True,   # Enable bfloat16
+    bf16=True,
     optim="adamw_8bit",
-    max_grad_norm=1.0,
 )
 
 try:
+    # Load the model first
+    load_model()
+    
     # Initialize trainer
     dataset = prepare_dataset()
     trainer = SFTTrainer(
-        model=model,
+        model=model,  # Now model is defined
         train_dataset=dataset,
         tokenizer=tokenizer,
         args=training_args,

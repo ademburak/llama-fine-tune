@@ -12,6 +12,14 @@ from transformers import AutoTokenizer, AutoImageProcessor, TextStreamer
 import uuid
 import logging
 from safetensors.torch import load_file
+import random
+
+# Enable CUDA optimizations
+torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 on matmul
+torch.backends.cudnn.allow_tf32 = True  # Allow TF32 on cudnn
+torch.backends.cudnn.benchmark = True  # Enable cudnn auto-tuner
+torch.backends.cuda.enable_mem_efficient_sdp = True  # Enable memory-efficient attention
+torch.backends.cuda.enable_flash_sdp = True  # Enable Flash Attention if available
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -41,7 +49,7 @@ def load_model():
     try:
         logger.info("Loading model and tokenizer...")
         model, tokenizer = FastVisionModel.from_pretrained(
-            "unsloth/Qwen2-VL-2B-Instruct-bnb-4bit",
+            "unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit",
             load_in_4bit=True,
             use_gradient_checkpointing="unsloth",
             device_map="auto"
@@ -49,16 +57,20 @@ def load_model():
         
         # Enable model for inference
         FastVisionModel.for_inference(model)
+        model.eval()
         
-        # Load the image processor
-        image_processor = AutoImageProcessor.from_pretrained("unsloth/Qwen2-VL-2B-Instruct-bnb-4bit")
+        # Load the image processor with optimized settings
+        image_processor = AutoImageProcessor.from_pretrained(
+            "unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit",
+            do_resize=True,
+            do_center_crop=True
+        )
         
         # Load the fine-tuned weights if they exist
         adapter_path = "final_model/adapter_model.safetensors"
         if os.path.exists(adapter_path):
             logger.info("Loading fine-tuned weights from safetensors...")
             try:
-                # Load using safetensors
                 state_dict = load_file(adapter_path)
                 model.load_state_dict(state_dict, strict=False)
                 logger.info("Successfully loaded fine-tuned weights")
@@ -68,6 +80,11 @@ def load_model():
         else:
             logger.warning("Fine-tuned weights not found, using base model")
         
+        # Clean up CUDA memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            
         model.eval()
         logger.info("Model loaded successfully")
     except Exception as e:
@@ -244,7 +261,7 @@ async def generate(
         # Format the instruction
         instruction = prompt
         
-        # Create messages in the correct format for Qwen2-VL
+        # Create messages in the correct format
         messages = [
             {"role": "user", "content": [
                 {"type": "image"},
@@ -261,10 +278,17 @@ async def generate(
             input_text,
             add_special_tokens=False,
             return_tensors="pt",
-        ).to(model.device)
+            padding=True,
+            truncation=True,
+            max_length=2048,
+            return_attention_mask=True
+        ).to(model.device, non_blocking=True)
         
-        # Generate response
-        with torch.no_grad():
+        # Print token information
+        logger.info(f"Input tokens: {len(inputs['input_ids'][0])}")
+        
+        # Generate with optimized settings
+        with torch.inference_mode(), torch.cuda.amp.autocast():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=512,
@@ -272,8 +296,14 @@ async def generate(
                 top_p=0.9,
                 do_sample=True,
                 pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id
+                eos_token_id=tokenizer.eos_token_id,
+                use_cache=True,
+                num_beams=1,
+                early_stopping=True
             )
+        
+        # Print output token information
+        logger.info(f"Generated tokens: {len(outputs[0]) - len(inputs['input_ids'][0])}")
         
         # Decode response
         response = tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -281,7 +311,14 @@ async def generate(
         # Clean up the response by removing the prompt
         response = response.replace(input_text, "").strip()
         
-        return {"response": response}
+        return {
+            "response": response,
+            "token_info": {
+                "input_tokens": len(inputs['input_ids'][0]),
+                "generated_tokens": len(outputs[0]) - len(inputs['input_ids'][0])
+            }
+        }
+        
     except Exception as e:
         logger.error(f"Error during generation: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -38,9 +38,9 @@ image_processor = None
 def load_model():
     global model, tokenizer, image_processor
     try:
-        logger.info("Loading base Qwen2-VL model and tokenizer...")
+        logger.info("Loading base Llama model and tokenizer...")
         model, tokenizer = FastVisionModel.from_pretrained(
-            "unsloth/Qwen2-VL-2B-Instruct-bnb-4bit",
+            "unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit",
             load_in_4bit=True,
             use_gradient_checkpointing="unsloth",
             device_map="auto"
@@ -48,10 +48,20 @@ def load_model():
         
         # Enable model for inference
         FastVisionModel.for_inference(model)
+        model.eval()
         
-        # Load the image processor
-        image_processor = AutoImageProcessor.from_pretrained("unsloth/Qwen2-VL-2B-Instruct-bnb-4bit")
+        # Load the image processor with optimized settings
+        image_processor = AutoImageProcessor.from_pretrained(
+            "unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit",
+            do_resize=True,
+            do_center_crop=True
+        )
         
+        # Clean up CUDA memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            
         model.eval()
         logger.info("Base model loaded successfully")
     except Exception as e:
